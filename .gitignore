@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Production build output
+dist/
+build/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Logs and runtime output
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+vite-dev*.log
+vite-dev*.err.log
+
+# Test and coverage artifacts
+coverage/
+.nyc_output/
+
+# TypeScript and Vite cache
+*.tsbuildinfo
+.vite/
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Package manager caches
+.npm/
+.pnpm-store/
