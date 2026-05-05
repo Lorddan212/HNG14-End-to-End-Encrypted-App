@@ -109,7 +109,6 @@ export default function App() {
 
   const handleLogout = useCallback(async () => {
     const currentSession = sessionRef.current;
-    clearAuthenticatedState();
 
     if (currentSession?.refreshToken) {
       try {
@@ -118,6 +117,8 @@ export default function App() {
         // Local logout must succeed even if the token is already expired.
       }
     }
+
+    clearAuthenticatedState();
   }, [api, clearAuthenticatedState]);
 
   if (!session) {
