@@ -137,9 +137,13 @@ export default function AuthScreen({ onLogin, onRegister }: AuthScreenProps) {
             Username
             <input
               autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
               maxLength={32}
+              name="username"
               onChange={(event) => setUsername(event.target.value)}
               placeholder="maya_chen"
+              spellCheck={false}
               value={username}
             />
           </label>
@@ -150,6 +154,7 @@ export default function AuthScreen({ onLogin, onRegister }: AuthScreenProps) {
               <input
                 autoComplete="name"
                 maxLength={128}
+                name="name"
                 onChange={(event) => setDisplayName(event.target.value)}
                 placeholder="Maya Chen"
                 value={displayName}
@@ -162,6 +167,7 @@ export default function AuthScreen({ onLogin, onRegister }: AuthScreenProps) {
             <input
               autoComplete={mode === "login" ? "current-password" : "new-password"}
               maxLength={128}
+              name="password"
               onChange={(event) => setPassword(event.target.value)}
               placeholder="••••••••"
               type="password"
