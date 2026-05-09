@@ -14,10 +14,9 @@ import { getWrappedPrivateKey, saveWrappedPrivateKey } from "./lib/vault";
 import type { CryptoState, SessionSnapshot } from "./types";
 
 export default function App() {
-  const initialSession = loadSession();
-  const [session, setSession] = useState<SessionSnapshot | null>(initialSession);
+  const [session, setSession] = useState<SessionSnapshot | null>(() => loadSession());
   const [cryptoState, setCryptoState] = useState<CryptoState | null>(null);
-  const sessionRef = useRef<SessionSnapshot | null>(initialSession);
+  const sessionRef = useRef<SessionSnapshot | null>(session);
 
   const commitSession = useCallback((nextSession: SessionSnapshot) => {
     sessionRef.current = nextSession;

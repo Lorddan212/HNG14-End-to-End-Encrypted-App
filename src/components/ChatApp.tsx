@@ -48,6 +48,12 @@ type ChatAppProps = {
   session: SessionSnapshot;
 };
 
+const INITIAL_THREAD_LIMIT = 25;
+const SYNC_THREAD_LIMIT = 25;
+const FALLBACK_SYNC_INTERVAL_MS = 3000;
+const BACKGROUND_SYNC_INTERVAL_MS = 9000;
+const MAX_RECONNECT_DELAY_MS = 10000;
+
 export default function ChatApp({
   api,
   cryptoState,
@@ -68,10 +74,28 @@ export default function ChatApp({
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const selectedPartnerRef = useRef<ChatPartner | null>(selectedPartner);
+  const messageIndexRef = useRef<{
+    ids: Set<string>;
+    payloadSignatures: Set<string>;
+  }>({
+    ids: new Set(),
+    payloadSignatures: new Set()
+  });
 
   useEffect(() => {
     selectedPartnerRef.current = selectedPartner;
   }, [selectedPartner]);
+
+  useEffect(() => {
+    messageIndexRef.current = {
+      ids: new Set(messages.map((message) => message.id)),
+      payloadSignatures: new Set(
+        messages
+          .map((message) => payloadSignature(message))
+          .filter((signature): signature is string => Boolean(signature))
+      )
+    };
+  }, [messages]);
 
   const decryptOne = useCallback(
     async (message: MessageResponse): Promise<DecryptedMessage> => {
@@ -124,47 +148,154 @@ export default function ChatApp({
     void refreshConversations();
   }, [refreshConversations]);
 
-  useEffect(() => {
-    setSocketStatus("connecting");
-    const socket = new WebSocket(websocketUrl(session.accessToken));
-    socketRef.current = socket;
+  const syncLatestMessages = useCallback(
+    async (partner: ChatPartner) => {
+      try {
+        const history = await api.getMessages(partner.user_id, SYNC_THREAD_LIMIT);
+        const knownMessages = messageIndexRef.current;
+        const unseenMessages = [...history]
+          .reverse()
+          .filter((message) => {
+            if (knownMessages.ids.has(message.id)) {
+              return false;
+            }
 
-    socket.onopen = () => setSocketStatus("open");
-    socket.onerror = () => setSocketStatus("error");
-    socket.onclose = () => setSocketStatus("closed");
-    socket.onmessage = (event) => {
-      const apiMessage = extractMessageFromFrame(event);
-      if (!apiMessage) {
+            const signature = payloadSignature(message);
+            return !signature || !knownMessages.payloadSignatures.has(signature);
+          });
+
+        if (unseenMessages.length === 0) {
+          return;
+        }
+
+        const decryptedMessages = await Promise.all(unseenMessages.map(decryptOne));
+        setMessages((currentMessages) =>
+          mergeMessages(currentMessages, decryptedMessages)
+        );
+      } catch (syncError) {
+        setError(toFriendlyError(syncError));
+      }
+    },
+    [api, decryptOne]
+  );
+
+  useEffect(() => {
+    let isDisposed = false;
+    let reconnectAttempt = 0;
+    let reconnectTimer: number | null = null;
+
+    function scheduleReconnect() {
+      if (isDisposed) {
         return;
       }
 
-      void (async () => {
-        const partnerId =
-          apiMessage.from_user_id === session.user.id
-            ? apiMessage.to_user_id
-            : apiMessage.from_user_id;
-        const decryptedMessage = await decryptOne(apiMessage);
+      const delay = Math.min(
+        1000 * 2 ** reconnectAttempt,
+        MAX_RECONNECT_DELAY_MS
+      );
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(connect, delay);
+    }
 
-        if (selectedPartnerRef.current?.user_id === partnerId) {
-          setMessages((currentMessages) => {
-            if (currentMessages.some((message) => message.id === apiMessage.id)) {
-              return currentMessages;
-            }
-            return [...currentMessages, decryptedMessage];
-          });
+    function connect() {
+      if (isDisposed) {
+        return;
+      }
+
+      setSocketStatus("connecting");
+      const socket = new WebSocket(websocketUrl(session.accessToken));
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        if (isDisposed) {
+          return;
         }
 
-        await refreshConversations();
-      })();
-    };
+        reconnectAttempt = 0;
+        setSocketStatus("open");
+        void refreshConversations();
+
+        const selected = selectedPartnerRef.current;
+        if (selected) {
+          void syncLatestMessages(selected);
+        }
+      };
+
+      socket.onerror = () => {
+        if (socketRef.current === socket) {
+          setSocketStatus("error");
+        }
+        socket.close();
+      };
+
+      socket.onclose = () => {
+        if (socketRef.current === socket) {
+          socketRef.current = null;
+          setSocketStatus("closed");
+          scheduleReconnect();
+        }
+      };
+
+      socket.onmessage = (event) => {
+        const apiMessage = extractMessageFromFrame(event);
+        if (!apiMessage) {
+          return;
+        }
+
+        void (async () => {
+          const partnerId =
+            apiMessage.from_user_id === session.user.id
+              ? apiMessage.to_user_id
+              : apiMessage.from_user_id;
+          const decryptedMessage = await decryptOne(apiMessage);
+
+          if (selectedPartnerRef.current?.user_id === partnerId) {
+            setMessages((currentMessages) =>
+              mergeMessages(currentMessages, [decryptedMessage])
+            );
+          }
+
+          await refreshConversations();
+        })();
+      };
+    }
+
+    connect();
 
     return () => {
-      socket.close();
-      if (socketRef.current === socket) {
-        socketRef.current = null;
+      isDisposed = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
       }
+      socketRef.current?.close();
+      socketRef.current = null;
     };
-  }, [decryptOne, refreshConversations, session.accessToken, session.user.id]);
+  }, [
+    decryptOne,
+    refreshConversations,
+    session.accessToken,
+    session.user.id,
+    syncLatestMessages
+  ]);
+
+  useEffect(() => {
+    if (!selectedPartner) {
+      return;
+    }
+
+    const interval = window.setInterval(
+      () => {
+        if (document.visibilityState === "visible") {
+          void syncLatestMessages(selectedPartner);
+        }
+      },
+      socketStatus === "open"
+        ? BACKGROUND_SYNC_INTERVAL_MS
+        : FALLBACK_SYNC_INTERVAL_MS
+    );
+
+    return () => window.clearInterval(interval);
+  }, [selectedPartner, socketStatus, syncLatestMessages]);
 
   useEffect(() => {
     const trimmedQuery = searchQuery.trim();
@@ -200,7 +331,7 @@ export default function ChatApp({
     setIsLoadingThread(true);
 
     try {
-      const history = await api.getMessages(partner.user_id);
+      const history = await api.getMessages(partner.user_id, INITIAL_THREAD_LIMIT);
       const decrypted = await Promise.all(
         [...history].reverse().map((message) => decryptOne(message))
       );
@@ -271,8 +402,9 @@ export default function ChatApp({
         const storedMessage = await api.sendMessage(selectedPartner.user_id, payload);
         const decrypted = await decryptOne(storedMessage);
         setMessages((currentMessages) =>
-          currentMessages.map((message) =>
-            message.id === tempId ? decrypted : message
+          mergeMessages(
+            currentMessages.filter((message) => message.id !== tempId),
+            [decrypted]
           )
         );
       }
@@ -546,4 +678,56 @@ function toFriendlyError(error: unknown): string {
   }
 
   return "Something went wrong. Please try again.";
+}
+
+function mergeMessages(
+  currentMessages: DecryptedMessage[],
+  incomingMessages: DecryptedMessage[]
+): DecryptedMessage[] {
+  const nextMessages = [...currentMessages];
+
+  for (const incoming of incomingMessages) {
+    const existingIndex = nextMessages.findIndex(
+      (message) => message.id === incoming.id
+    );
+
+    if (existingIndex >= 0) {
+      nextMessages[existingIndex] = incoming;
+      continue;
+    }
+
+    const incomingSignature = payloadSignature(incoming);
+    const optimisticIndex = incomingSignature
+      ? nextMessages.findIndex(
+          (message) =>
+            message.id.startsWith("temp-") &&
+            payloadSignature(message) === incomingSignature
+        )
+      : -1;
+
+    if (optimisticIndex >= 0) {
+      nextMessages[optimisticIndex] = incoming;
+      continue;
+    }
+
+    nextMessages.push(incoming);
+  }
+
+  return nextMessages.sort(
+    (left, right) =>
+      new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+  );
+}
+
+function payloadSignature(message: MessageResponse): string | null {
+  if (!isEncryptedPayload(message.payload)) {
+    return null;
+  }
+
+  return [
+    message.from_user_id,
+    message.to_user_id,
+    message.payload.ciphertext,
+    message.payload.iv
+  ].join(":");
 }
